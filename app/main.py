@@ -148,48 +148,9 @@ def healthz():
 # ----------------------------------------------------------
 @app.middleware("http")
 async def audit_mw(request: Request, call_next):
-
-    # ✅ BỎ QUA preflight & auth
-    if request.method == "OPTIONS" or request.url.path.startswith("/auth"):
-        return await call_next(request)
-
-    origin = request.headers.get("origin")
-    logger.info(
-        f"[CORS-DBG] -> {request.method} {request.url.path} | Origin={origin}"
-    )
-
-    payload = None
-    if request.method in ("POST", "PUT", "PATCH"):
-        if request.headers.get("content-type", "").startswith("application/json"):
-            try:
-                payload = await request.json()
-            except Exception:
-                payload = None
-
-    response = await call_next(request)
-
-    # ✅ audit log KHÔNG ĐƯỢC PHÁ response
-    try:
-        async for db in get_async_session():
-            await db.execute(
-                text(
-                    'INSERT INTO audit_logs(tenant_id,"user",method,path,status,ip,payload,created_at) '
-                    'VALUES (1,:u,:m,:p,:s,:i,:pl,NOW())'
-                ),
-                {
-                    "u": request.headers.get("x-user", "unknown"),
-                    "m": request.method,
-                    "p": request.url.path,
-                    "s": response.status_code,
-                    "i": request.client.host if request.client else None,
-                    "pl": json.dumps(payload) if payload else None,
-                },
-            )
-            await db.commit()
-    except Exception as e:
-        logger.error(f"Audit log skipped: {e}")
-
+    response: Response = await call_next(request)
     return response
+
 
 
 
