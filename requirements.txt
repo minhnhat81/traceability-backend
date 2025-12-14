@@ -1,19 +1,36 @@
+# --- FastAPI core ---
 fastapi
 uvicorn[standard]
 gunicorn
 
+# --- Config & settings ---
 pydantic
 pydantic-settings
-
-python-multipart
-
-PyJWT
-
-sqlalchemy
-psycopg2-binary
-alembic
-
-requests
 python-dotenv
 
+# --- Auth / Security ---
+PyJWT
+cryptography
+passlib[bcrypt]
+
+# --- HTTP / External ---
+httpx
+requests
+
+# --- Multipart / Upload ---
+python-multipart
+
+# --- Blockchain ---
 web3
+
+# --- Database ---
+sqlalchemy
+alembic
+psycopg2-binary
+
+# --- Async / Utils ---
+anyio
+starlette
+
+# --- Others (safe to keep) ---
+typing-extensions
