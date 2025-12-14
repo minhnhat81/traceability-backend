@@ -58,7 +58,7 @@ async def login(
         or_(User.username == form_data.username, User.email == form_data.username)
     )
 
-    result = await db.execute(query)
+    result = db.execute(query)
     user = result.scalars().first()
 
     if not user:
