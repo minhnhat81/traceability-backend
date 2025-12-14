@@ -3,11 +3,14 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from sqlalchemy.orm import declarative_base
 from app.core.config import settings
 
-# ===================================
-# ⚙️ Kết nối database (async)
-# ===================================
 DATABASE_URL = settings.DATABASE_URL
-if not DATABASE_URL.startswith("postgresql+asyncpg://"):
+
+# Fix scheme cho asyncpg
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace(
+        "postgres://", "postgresql+asyncpg://"
+    )
+elif DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace(
         "postgresql://", "postgresql+asyncpg://"
     )
@@ -17,6 +20,9 @@ engine = create_async_engine(
     echo=False,
     future=True,
     pool_pre_ping=True,
+    connect_args={
+        "ssl": "require"   # 🔥 DÒNG QUYẾT ĐỊNH
+    },
 )
 
 AsyncSessionLocal = async_sessionmaker(
@@ -29,15 +35,9 @@ AsyncSessionLocal = async_sessionmaker(
 
 Base = declarative_base()
 
-# ===================================
-# ✅ Dependency chuẩn FastAPI
-# ===================================
 async def get_db():
     async with AsyncSessionLocal() as session:
         yield session
 
-# ✅ ALIAS để không vỡ code cũ
 get_async_session = get_db
-
-# ✅ Alias cho code sync cũ (bạn đang dùng trong audit_mw)
 SessionLocal = AsyncSessionLocal
