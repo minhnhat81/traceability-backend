@@ -1,13 +1,15 @@
 fastapi
-uvicorn
+uvicorn[standard]
 gunicorn
 
 pydantic>=2.0
 pydantic-settings
 
+PyJWT
+
 sqlalchemy
 asyncpg
 psycopg2-binary
 
-python-dotenv
 httpx
+python-dotenv
