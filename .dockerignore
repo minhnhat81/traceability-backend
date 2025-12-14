@@ -1,0 +1,16 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+.env
+.git
+.gitignore
+
+tests
+services
+migrations
+
+Dockerfile.from_admin
+alembic.ini.from_admin
+requirements.txt.from_admin
