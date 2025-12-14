@@ -148,36 +148,27 @@ def healthz():
 # ----------------------------------------------------------
 @app.middleware("http")
 async def audit_mw(request: Request, call_next):
+
+    # ✅ BỎ QUA preflight & auth
+    if request.method == "OPTIONS" or request.url.path.startswith("/auth"):
+        return await call_next(request)
+
     origin = request.headers.get("origin")
     logger.info(
-        f"[CORS-DBG] -> {request.method} {request.url.path} | "
-        f"Origin={origin} | Content-Type={request.headers.get('content-type')}"
+        f"[CORS-DBG] -> {request.method} {request.url.path} | Origin={origin}"
     )
 
     payload = None
-
     if request.method in ("POST", "PUT", "PATCH"):
-        content_type = request.headers.get("content-type", "")
-        if content_type.startswith("application/json"):
+        if request.headers.get("content-type", "").startswith("application/json"):
             try:
-                body_bytes = await request.body()
-                payload = json.loads(body_bytes.decode()) if body_bytes else None
+                payload = await request.json()
             except Exception:
                 payload = None
 
-    response: Response = await call_next(request)
+    response = await call_next(request)
 
-    acao = response.headers.get("access-control-allow-origin")
-    acac = response.headers.get("access-control-allow-credentials")
-    logger.info(
-        f"[CORS-DBG] <- {response.status_code} {request.url.path} | "
-        f"ACAO={acao} ACAC={acac}"
-    )
-
-    response.headers["X-Debug-Origin"] = origin or ""
-    response.headers["X-Debug-Handled-By"] = "audit_mw"
-
-    # ✅ Async audit log (KHÔNG còn warning)
+    # ✅ audit log KHÔNG ĐƯỢC PHÁ response
     try:
         async for db in get_async_session():
             await db.execute(
@@ -191,12 +182,12 @@ async def audit_mw(request: Request, call_next):
                     "p": request.url.path,
                     "s": response.status_code,
                     "i": request.client.host if request.client else None,
-                    "pl": json.dumps(payload) if payload is not None else None,
+                    "pl": json.dumps(payload) if payload else None,
                 },
             )
             await db.commit()
     except Exception as e:
-        logger.warning(f"Audit log failed: {e}")
+        logger.error(f"Audit log skipped: {e}")
 
     return response
 
