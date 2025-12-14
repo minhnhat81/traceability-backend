@@ -2,10 +2,13 @@ fastapi
 uvicorn[standard]
 gunicorn
 
-pydantic>=2.0
+pydantic
 pydantic-settings
 
+python-jose
 PyJWT
+
+python-multipart
 
 sqlalchemy
 asyncpg
