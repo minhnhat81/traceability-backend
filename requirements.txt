@@ -5,14 +5,15 @@ gunicorn
 pydantic
 pydantic-settings
 
-python-jose
-PyJWT
-
 python-multipart
 
-sqlalchemy
-asyncpg
-psycopg2-binary
+PyJWT
 
-httpx
+sqlalchemy
+psycopg2-binary
+alembic
+
+requests
 python-dotenv
+
+web3
