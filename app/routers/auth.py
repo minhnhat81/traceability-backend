@@ -73,10 +73,10 @@ async def login(
     access_token = create_access_token(
         {
             "sub": user.username,
-            "role": user.role,
-            "tenant_id": getattr(user, "tenant_id", 1),
-            "email": getattr(user, "email", None),
-            "name": getattr(user, "name", None),
+            "role": user.role.name if user.role else None,
+            "tenant_id": user.tenant_id,
+            "email": user.email,
+            "name": user.name,
         }
     )
 
@@ -85,7 +85,7 @@ async def login(
         "token_type": "bearer",
         "user": {
             "username": user.username,
-            "role": user.role,
+            "role": user.role.name if user.role else None,
             "tenant_id": user.tenant_id,
             "email": user.email,
             "name": user.name,

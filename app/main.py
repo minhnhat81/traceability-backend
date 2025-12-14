@@ -148,9 +148,57 @@ def healthz():
 # ----------------------------------------------------------
 @app.middleware("http")
 async def audit_mw(request: Request, call_next):
-    response: Response = await call_next(request)
-    return response
+    origin = request.headers.get("origin")
+    logger.info(
+        f"[CORS-DBG] -> {request.method} {request.url.path} | "
+        f"Origin={origin} | Content-Type={request.headers.get('content-type')}"
+    )
 
+    payload = None
+
+    if request.method in ("POST", "PUT", "PATCH"):
+        content_type = request.headers.get("content-type", "")
+        if content_type.startswith("application/json"):
+            try:
+                body_bytes = await request.body()
+                payload = json.loads(body_bytes.decode()) if body_bytes else None
+            except Exception:
+                payload = None
+
+    response: Response = await call_next(request)
+
+    acao = response.headers.get("access-control-allow-origin")
+    acac = response.headers.get("access-control-allow-credentials")
+    logger.info(
+        f"[CORS-DBG] <- {response.status_code} {request.url.path} | "
+        f"ACAO={acao} ACAC={acac}"
+    )
+
+    response.headers["X-Debug-Origin"] = origin or ""
+    response.headers["X-Debug-Handled-By"] = "audit_mw"
+
+    # ✅ Async audit log (KHÔNG còn warning)
+    try:
+        async for db in get_async_session():
+            await db.execute(
+                text(
+                    'INSERT INTO audit_logs(tenant_id,"user",method,path,status,ip,payload,created_at) '
+                    'VALUES (1,:u,:m,:p,:s,:i,:pl,NOW())'
+                ),
+                {
+                    "u": request.headers.get("x-user", "unknown"),
+                    "m": request.method,
+                    "p": request.url.path,
+                    "s": response.status_code,
+                    "i": request.client.host if request.client else None,
+                    "pl": json.dumps(payload) if payload is not None else None,
+                },
+            )
+            await db.commit()
+    except Exception as e:
+        logger.warning(f"Audit log failed: {e}")
+
+    return response
 
 
 
