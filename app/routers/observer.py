@@ -3,7 +3,7 @@ from .ws import hub
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from db import get_db
+from app.core.db import get_db
 from app.security import verify_jwt, check_permission
 
 router = APIRouter(prefix="/api/observer", tags=["observer"])
@@ -27,7 +27,8 @@ def ingest_fabric(payload: dict = Body(...), db: Session = Depends(get_db)):
 from sqlalchemy.orm import Session
 from sqlalchemy import text as _text
 from fastapi import Depends
-from db import get_db
+from app.core.db import get_db
+
 
 @router.post("/ingest/fabric/anchored")
 def anchored_upsert(payload: dict, db: Session = Depends(get_db)):
@@ -48,7 +49,7 @@ def anchored_upsert(payload: dict, db: Session = Depends(get_db)):
 from sqlalchemy.orm import Session
 from sqlalchemy import text as _text
 from fastapi import Depends
-from db import get_db
+from app.core.db import get_db
 
 @router.post("/ingest/polygon/anchored")
 def anchored_polygon(payload: dict, db: Session = Depends(get_db)):

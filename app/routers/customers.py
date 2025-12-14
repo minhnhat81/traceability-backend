@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from db import get_db
+from app.core.db import get_db
 from app.security import verify_jwt, check_permission, scope_where_clause
 
 router = APIRouter(prefix="/api/customers", tags=["customers"])

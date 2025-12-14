@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from db import get_db
+from app.core.db import get_db
 from app.security import verify_jwt, scope_where_clause, check_permission
 import io, zipfile, json, datetime
 

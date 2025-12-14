@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from db import get_db
+from app.core.db import get_db
 from app.security import verify_jwt, check_permission
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
