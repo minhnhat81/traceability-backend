@@ -4,7 +4,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from jose import jwt
 from passlib.context import CryptContext
 from sqlalchemy import select, or_
-
+from sqlalchemy.ext.asyncio import AsyncSession  # ✅ BẮT BUỘC
 from app.core.db import get_db
 from app.models.user import User
 
