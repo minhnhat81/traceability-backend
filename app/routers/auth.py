@@ -42,7 +42,7 @@ class LoginRequest(BaseModel):
 
 class UserResponse(BaseModel):
     username: str
-    email: Optional[Str]
+    email: Optional[str]
     role: str
     tenant_id: int
     name: Optional[str]
