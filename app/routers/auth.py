@@ -48,17 +48,16 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
 @router.post("/login")
 async def login(
     form_data: OAuth2PasswordRequestForm = Depends(),
-    db=Depends(get_db),
+    db: AsyncSession = Depends(get_db),  # 👈 ép kiểu rõ
 ):
-    """
-    Đăng nhập hệ thống bằng username hoặc email.
-    Trả về access_token (JWT) nếu thành công.
-    """
     query = select(User).where(
-        or_(User.username == form_data.username, User.email == form_data.username)
+        or_(
+            User.username == form_data.username,
+            User.email == form_data.username,
+        )
     )
 
-    result = await db.execute(query)
+    result = await db.execute(query)   # ✅ BẮT BUỘC await
     user = result.scalars().first()
 
     if not user:
@@ -70,15 +69,13 @@ async def login(
     if not verify_password(form_data.password, user.password_hash or ""):
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
-    access_token = create_access_token(
-        {
-            "sub": user.username,
-            "role": user.role,
-            "tenant_id": getattr(user, "tenant_id", 1),
-            "email": getattr(user, "email", None),
-            "name": getattr(user, "name", None),
-        }
-    )
+    access_token = create_access_token({
+        "sub": user.username,
+        "role": user.role,
+        "tenant_id": user.tenant_id,
+        "email": user.email,
+        "name": user.name,
+    })
 
     return {
         "access_token": access_token,
@@ -91,3 +88,4 @@ async def login(
             "name": user.name,
         },
     }
+
