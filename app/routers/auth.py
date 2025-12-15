@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from jose import jwt
 from passlib.context import CryptContext
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,7 +42,7 @@ class LoginRequest(BaseModel):
 
 class UserResponse(BaseModel):
     username: str
-    email: Optional[EmailStr]
+    email: Optional[Str]
     role: str
     tenant_id: int
     name: Optional[str]
