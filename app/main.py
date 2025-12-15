@@ -8,7 +8,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.core.config import settings
-from app.core.db import SessionLocal
 from app.security import verify_jwt  # ✅ import sớm
 
 from app.core.db import get_async_session
