@@ -59,7 +59,8 @@ async def login(
 
     result = await db.execute(query)   # ✅ BẮT BUỘC await
     user = result.scalars().first()
-
+    print("USER =", user)                       # 👈
+    print("FIELDS =", user.__dict__ if user else None)  # 👈
     if not user:
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
