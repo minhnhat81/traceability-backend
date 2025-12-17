@@ -3,7 +3,7 @@ from typing import Optional
 import traceback
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from jose import jwt
+import jwt   # ✅ DÙNG PYJWT (KHÔNG DÙNG python-jose)
 from passlib.context import CryptContext
 from pydantic import BaseModel
 from sqlalchemy import select, or_
@@ -19,13 +19,13 @@ from app.models.user import User
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 # ==========================================================
-# JWT config
+# JWT config (CHỐT 1 SECRET DUY NHẤT)
 # ==========================================================
-if not settings.SECRET_KEY:
-    raise RuntimeError("SECRET_KEY is not set in environment")
+if not settings.JWT_SECRET:
+    raise RuntimeError("JWT_SECRET is not set in environment")
 
-SECRET_KEY = settings.SECRET_KEY
-ALGORITHM = "HS256"
+SECRET_KEY = settings.JWT_SECRET
+ALGORITHM = settings.JWT_ALGORITHM or "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
 # ==========================================================
@@ -37,7 +37,7 @@ pwd_context = CryptContext(
 )
 
 # ==========================================================
-# Pydantic Schemas
+# Schemas
 # ==========================================================
 class LoginRequest(BaseModel):
     username: str
@@ -74,16 +74,18 @@ def create_access_token(
     data: dict,
     expires_delta: Optional[timedelta] = None,
 ) -> str:
-    to_encode = data.copy()
+    payload = data.copy()
     expire = datetime.utcnow() + (
         expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     )
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    payload["exp"] = expire
+
+    # ✅ PYJWT
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
 # ==========================================================
-# Login endpoint (DEBUG SAFE)
+# Login endpoint
 # ==========================================================
 @router.post(
     "/login",
@@ -94,14 +96,7 @@ async def login(
     data: LoginRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Đăng nhập bằng username hoặc email
-    """
-
     try:
-        # --------------------------------------------------
-        # Query user
-        # --------------------------------------------------
         stmt = select(User).where(
             or_(
                 User.username == data.username,
@@ -113,26 +108,14 @@ async def login(
         user = result.scalars().first()
 
         if not user:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid username or password",
-            )
+            raise HTTPException(status_code=401, detail="Invalid username or password")
 
         if not getattr(user, "is_active", True):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="User account is inactive",
-            )
+            raise HTTPException(status_code=403, detail="User account is inactive")
 
-        if not verify_password(data.password, getattr(user, "password_hash", None)):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid username or password",
-            )
+        if not verify_password(data.password, user.password_hash):
+            raise HTTPException(status_code=401, detail="Invalid username or password")
 
-        # --------------------------------------------------
-        # Create token
-        # --------------------------------------------------
         token_payload = {
             "sub": user.username,
             "user_id": user.id,
@@ -155,12 +138,7 @@ async def login(
 
     except HTTPException:
         raise
-
     except Exception as e:
-        # 🔥 LOG THẬT – HEROKU SẼ IN RA
         print("🔥 LOGIN ERROR:", e)
         traceback.print_exc()
-        raise HTTPException(
-            status_code=500,
-            detail=f"Internal auth error: {str(e)}",
-        )
+        raise HTTPException(status_code=500, detail="Internal auth error")
