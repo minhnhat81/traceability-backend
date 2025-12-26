@@ -1037,3 +1037,50 @@ def infer_role_from_batch_code(batch_code: str, event_time):
     return "unknown"
 
 
+# ============================================================
+# Delete Documents
+# ============================================================
+
+@router.delete("/api/documents/{file_hash}")
+async def delete_document(
+    file_hash: str,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(verify_jwt),
+):
+    tenant_id = user.get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(403, "Missing tenant_id")
+
+    # 1️⃣ Không cho xoá nếu document đã gắn EPCIS
+    q = await db.execute(
+        text("""
+            SELECT 1
+            FROM epcis_events
+            WHERE tenant_id = :t
+              AND doc_bundle_id = :h
+            LIMIT 1
+        """),
+        {"t": tenant_id, "h": file_hash},
+    )
+
+    if q.first():
+        raise HTTPException(
+            400,
+            "Document already linked to EPCIS event, cannot delete",
+        )
+
+    # 2️⃣ Xoá document
+    r = await db.execute(
+        text("""
+            DELETE FROM documents
+            WHERE tenant_id = :t
+              AND file_hash = :h
+        """),
+        {"t": tenant_id, "h": file_hash},
+    )
+
+    if r.rowcount == 0:
+        raise HTTPException(404, "Document not found")
+
+    await db.commit()
+    return {"ok": True}
