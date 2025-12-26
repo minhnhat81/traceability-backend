@@ -19,11 +19,11 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 # ============================================================
-# 🧩 Helper: Sinh mã doc_bundle_id tự động (một mã cho cả batch upload)
+# 🧩 Helper: Sinh mã doc_bundle_id
 # ============================================================
 def generate_doc_bundle_id() -> str:
     date_code = datetime.utcnow().strftime("%Y%m%d")
-    rand_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
+    rand_code = "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
     return f"BATCH{date_code}-01-{rand_code}"
 
 
@@ -34,67 +34,49 @@ def generate_doc_bundle_id() -> str:
 async def upload_documents(
     files: list[UploadFile] = File(...),
     db: AsyncSession = Depends(get_db),
-    user=Depends(verify_jwt)
+    user=Depends(verify_jwt),
 ):
-    """
-    📂 Upload một hoặc nhiều file chứng từ (Invoice, CO, GRS, GOTS, ...)
-    - Tính SHA-256 hash, lưu metadata + tenant_id
-    - Sinh VC payload + tự tạo doc_bundle_id cho mỗi batch upload
-    - Nếu file đã tồn tại (trùng hash trong cùng tenant) → trả trạng thái "duplicate" + bundle/doc info
-    """
     try:
         if not user or user.get("is_active") is False:
-            raise HTTPException(status_code=403, detail="Inactive or unauthorized user")
+            raise HTTPException(403, "Inactive or unauthorized user")
 
         tenant_id = user.get("tenant_id")
         if not tenant_id:
-            raise HTTPException(status_code=403, detail="Missing tenant_id")
+            raise HTTPException(403, "Missing tenant_id")
 
-        # 🔹 Mỗi batch upload -> tạo 1 bundle_id chung
         batch_bundle_id = generate_doc_bundle_id()
-
         results = []
+
         for file in files:
             try:
                 content = await file.read()
                 sha256_hash = hashlib.sha256(content).hexdigest()
-                file_uuid = str(uuid.uuid4())
-                stored_name = f"{file_uuid}_{file.filename}"
-                save_path = os.path.join(UPLOAD_DIR, stored_name)
 
-                # ✅ Kiểm tra trùng theo (tenant_id, file_hash)
                 existing_q = await db.execute(
                     select(Document).where(
                         Document.tenant_id == tenant_id,
-                        Document.file_hash == sha256_hash
+                        Document.file_hash == sha256_hash,
                     )
                 )
                 existing_doc = existing_q.scalar_one_or_none()
 
                 if existing_doc:
-                    # Trả về thông tin hiện có (không ghi đè)
                     results.append({
                         "filename": file.filename,
                         "sha256": sha256_hash,
-                        "path": existing_doc.path,
                         "status": "duplicate",
-                        "doc_bundle_id": getattr(existing_doc, "doc_bundle_id", None),
-                        "vc_hash_hex": getattr(existing_doc, "vc_hash_hex", None),
+                        "doc_bundle_id": existing_doc.doc_bundle_id,
+                        "vc_hash_hex": existing_doc.vc_hash_hex,
                     })
                     continue
 
-                # Lưu file vật lý
+                file_uuid = str(uuid.uuid4())
+                stored_name = f"{file_uuid}_{file.filename}"
+                save_path = os.path.join(UPLOAD_DIR, stored_name)
+
                 with open(save_path, "wb") as f:
                     f.write(content)
 
-                # Metadata cơ bản (có thể mở rộng nếu cần)
-                file_meta = {
-                    "file_type": file.content_type,
-                    "file_size": len(content),
-                    "original_name": file.filename,
-                }
-
-                # Sinh VC payload (dùng làm “digital evidence” cho riêng file)
                 vc_payload = {
                     "@context": ["https://www.w3.org/2018/credentials/v1"],
                     "type": ["VerifiableCredential", "DocumentCredential"],
@@ -102,17 +84,15 @@ async def upload_documents(
                     "issuanceDate": datetime.utcnow().isoformat() + "Z",
                     "credentialSubject": {
                         "fileName": file.filename,
-                        "fileType": file.content_type,
                         "fileHash": sha256_hash,
                         "storage": save_path,
-                        "meta": file_meta,
                     },
                 }
+
                 vc_hash_hex = hashlib.sha256(
                     json.dumps(vc_payload, sort_keys=True).encode("utf-8")
                 ).hexdigest()
 
-                # Ghi DB
                 new_doc = Document(
                     tenant_id=tenant_id,
                     file_name=file.filename,
@@ -126,6 +106,7 @@ async def upload_documents(
                     issued_at=datetime.utcnow(),
                     created_at=datetime.utcnow(),
                 )
+
                 db.add(new_doc)
                 await db.commit()
                 await db.refresh(new_doc)
@@ -133,19 +114,17 @@ async def upload_documents(
                 results.append({
                     "filename": file.filename,
                     "sha256": sha256_hash,
-                    "path": save_path,
                     "status": "uploaded",
                     "doc_bundle_id": batch_bundle_id,
                     "vc_hash_hex": vc_hash_hex,
-                    "vc": vc_payload,
                 })
 
             except Exception as inner_e:
                 await db.rollback()
                 results.append({
                     "filename": file.filename,
+                    "status": "failed",
                     "error": str(inner_e),
-                    "status": "failed"
                 })
 
         return {"ok": True, "results": results}
@@ -154,7 +133,7 @@ async def upload_documents(
         raise
     except Exception as e:
         await db.rollback()
-        raise HTTPException(status_code=500, detail=f"Document upload failed: {e}")
+        raise HTTPException(500, f"Document upload failed: {e}")
 
 
 # ============================================================
@@ -165,40 +144,37 @@ async def list_documents(
     page: int = Query(1, ge=1),
     size: int = Query(10, le=200),
     db: AsyncSession = Depends(get_db),
-    user=Depends(verify_jwt)
+    user=Depends(verify_jwt),
 ):
-    """
-    📄 Liệt kê danh sách tài liệu của tenant
-    """
     tenant_id = user.get("tenant_id")
     if not tenant_id:
-        raise HTTPException(status_code=403, detail="Missing tenant_id")
+        raise HTTPException(403, "Missing tenant_id")
 
     offset = (page - 1) * size
-    query = text(
-        """
-        SELECT id, file_name, file_hash, file_type, file_size, path,
-               created_at, doc_bundle_id, vc_hash_hex
-        FROM documents
-        WHERE tenant_id = :tid
-        ORDER BY created_at DESC
-        LIMIT :lim OFFSET :off
-        """
+
+    result = await db.execute(
+        text("""
+            SELECT file_name, file_hash, file_type, file_size,
+                   created_at, path, doc_bundle_id, vc_hash_hex
+            FROM documents
+            WHERE tenant_id=:t
+            ORDER BY created_at DESC
+            LIMIT :l OFFSET :o
+        """),
+        {"t": tenant_id, "l": size, "o": offset},
     )
 
-    result = await db.execute(query, {"tid": tenant_id, "lim": size, "off": offset})
     rows = result.fetchall()
-
     total = await db.execute(
-        text("SELECT COUNT(1) FROM documents WHERE tenant_id=:tid"), {"tid": tenant_id}
+        text("SELECT COUNT(1) FROM documents WHERE tenant_id=:t"),
+        {"t": tenant_id},
     )
-    total_count = total.scalar() or 0
 
     return {
         "items": [
             {
-                "file_hash": r.file_hash,
                 "file_name": r.file_name,
+                "file_hash": r.file_hash,
                 "file_type": r.file_type,
                 "file_size": r.file_size,
                 "created_at": str(r.created_at),
@@ -208,50 +184,12 @@ async def list_documents(
             }
             for r in rows
         ],
-        "meta": {"page": page, "size": size, "total": total_count},
+        "meta": {"page": page, "size": size, "total": total.scalar()},
     }
 
 
 # ============================================================
-# 📄 GET /api/documents/{sha256}
-# ============================================================
-@router.get("/{sha256}")
-async def get_document(
-    sha256: str,
-    db: AsyncSession = Depends(get_db),
-    user=Depends(verify_jwt)
-):
-    """
-    🔍 Lấy chi tiết file theo hash (giới hạn theo tenant)
-    """
-    tenant_id = user.get("tenant_id")
-    if not tenant_id:
-        raise HTTPException(status_code=403, detail="Missing tenant_id")
-
-    result = await db.execute(
-        select(Document).where(
-            Document.tenant_id == tenant_id,
-            Document.file_hash == sha256
-        )
-    )
-    doc = result.scalar_one_or_none()
-
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    return {
-        "sha256": doc.file_hash,
-        "filename": doc.file_name,
-        "file_type": doc.file_type,
-        "file_size": doc.file_size,
-        "created_at": str(doc.created_at),
-        "path": doc.path,
-        "doc_bundle_id": doc.doc_bundle_id,
-        "vc_hash_hex": doc.vc_hash_hex,
-        "vc_payload": doc.vc_payload,
-    }
-# ============================================================
-# 📄 Delete documents
+# 📄 DELETE /api/documents/{file_hash}
 # ============================================================
 @router.delete("/{file_hash}")
 async def delete_document(
@@ -259,11 +197,11 @@ async def delete_document(
     db: AsyncSession = Depends(get_db),
     user=Depends(verify_jwt),
 ):
-    tenant_id = int(user["tenant_id"])
+    tenant_id = int(user.get("tenant_id") or 0)
 
     q = await db.execute(
         text("""
-            SELECT id, doc_bundle_id, vc_hash_hex
+            SELECT id, vc_hash_hex
             FROM documents
             WHERE tenant_id=:t AND file_hash=:h
         """),
@@ -274,11 +212,11 @@ async def delete_document(
     if not doc:
         raise HTTPException(404, "Document not found")
 
-    # 🚫 Đã gắn EPCIS / VC → không cho xoá
-    if doc["doc_bundle_id"] or doc["vc_hash_hex"]:
+    # ❗ CHỈ CẤM XOÁ KHI ĐÃ KÝ VC (EPCIS / pháp lý)
+    if doc["vc_hash_hex"]:
         raise HTTPException(
             400,
-            "Document already linked to EPCIS / VC, cannot delete",
+            "Document already signed / used in EPCIS, cannot delete",
         )
 
     await db.execute(
