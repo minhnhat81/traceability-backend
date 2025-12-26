@@ -250,3 +250,41 @@ async def get_document(
         "vc_hash_hex": doc.vc_hash_hex,
         "vc_payload": doc.vc_payload,
     }
+# ============================================================
+# 📄 Delete documents
+# ============================================================
+@router.delete("/{file_hash}")
+async def delete_document(
+    file_hash: str,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(verify_jwt),
+):
+    tenant_id = int(user["tenant_id"])
+
+    q = await db.execute(
+        text("""
+            SELECT id, doc_bundle_id, vc_hash_hex
+            FROM documents
+            WHERE tenant_id=:t AND file_hash=:h
+        """),
+        {"t": tenant_id, "h": file_hash},
+    )
+    doc = q.mappings().first()
+
+    if not doc:
+        raise HTTPException(404, "Document not found")
+
+    # 🚫 Đã gắn EPCIS / VC → không cho xoá
+    if doc["doc_bundle_id"] or doc["vc_hash_hex"]:
+        raise HTTPException(
+            400,
+            "Document already linked to EPCIS / VC, cannot delete",
+        )
+
+    await db.execute(
+        text("DELETE FROM documents WHERE tenant_id=:t AND file_hash=:h"),
+        {"t": tenant_id, "h": file_hash},
+    )
+    await db.commit()
+
+    return {"ok": True, "deleted": file_hash}
