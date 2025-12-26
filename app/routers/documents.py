@@ -199,9 +199,10 @@ async def delete_document(
 ):
     tenant_id = int(user.get("tenant_id") or 0)
 
+    # 1️⃣ Lấy document
     q = await db.execute(
         text("""
-            SELECT id, vc_hash_hex
+            SELECT id, doc_bundle_id
             FROM documents
             WHERE tenant_id=:t AND file_hash=:h
         """),
@@ -212,13 +213,27 @@ async def delete_document(
     if not doc:
         raise HTTPException(404, "Document not found")
 
-    # ❗ CHỈ CẤM XOÁ KHI ĐÃ KÝ VC (EPCIS / pháp lý)
-    if doc["vc_hash_hex"]:
-        raise HTTPException(
-            400,
-            "Document already signed / used in EPCIS, cannot delete",
-        )
+    bundle_id = doc["doc_bundle_id"]
 
+    # 2️⃣ KIỂM TRA EPCIS — CHỈ CẤM XOÁ KHI ĐÃ DÙNG
+    if bundle_id:
+        used = await db.execute(
+            text("""
+                SELECT 1
+                FROM epcis_events
+                WHERE tenant_id=:t
+                  AND doc_bundle_id=:b
+                LIMIT 1
+            """),
+            {"t": tenant_id, "b": bundle_id},
+        )
+        if used.first():
+            raise HTTPException(
+                400,
+                "Document already used in EPCIS, cannot delete",
+            )
+
+    # 3️⃣ OK → XOÁ
     await db.execute(
         text("DELETE FROM documents WHERE tenant_id=:t AND file_hash=:h"),
         {"t": tenant_id, "h": file_hash},
@@ -226,3 +241,4 @@ async def delete_document(
     await db.commit()
 
     return {"ok": True, "deleted": file_hash}
+
