@@ -130,17 +130,15 @@ async def _get_batch(db: AsyncSession, code: str):
 
 
 # ----------------------------
-# EPCIS Events – LẤY ĐỦ MỌI TẦNG THEO product_code
-# ----------------------------
-# ----------------------------
 # EPCIS Events – LẤY ĐỦ CHUỖI FARM → SUPPLIER → MFG → BRAND
 # ----------------------------
-async def _get_events(db: AsyncSession, tenant_id: int, final_code: str):
+async def _get_events(db: AsyncSession, tenant_id: int, ref_code: str):
     """
-    Lấy toàn bộ EPCIS events cho cả chuỗi batch:
-    - Mọi batch có code là prefix của final_code
-      (vd: GARMENT-002, GARMENT-002-SUPPLIER-..., ...-MANUFACTURER-..., ...-BRAND-...)
-    - Kèm owner_role của batch để biết event thuộc tầng nào.
+    FIX CHUẨN:
+    - ref_code có thể là base batch (FABRIC-002) hoặc final batch code dài nhất.
+    - Cần lấy tất cả events thuộc "chain" bằng 2 chiều:
+        1) ref_code LIKE batch_code%  (batch_code là prefix của ref_code)
+        2) batch_code LIKE ref_code%  (batch_code là extension của ref_code)
     """
     sql = """
     SELECT
@@ -175,12 +173,14 @@ async def _get_events(db: AsyncSession, tenant_id: int, final_code: str):
       ON b.code = e.batch_code
      AND b.tenant_id = e.tenant_id
     WHERE e.tenant_id = :t
-      -- mọi batch mà code là prefix của final_code
-      AND :final_code LIKE e.batch_code || '%'
+      AND (
+        :ref_code LIKE e.batch_code || '%'
+        OR e.batch_code LIKE :ref_code || '%'
+      )
     ORDER BY e.event_time ASC, e.id ASC
     """
 
-    rs = await db.execute(text(sql), {"t": tenant_id, "final_code": final_code})
+    rs = await db.execute(text(sql), {"t": tenant_id, "ref_code": ref_code})
     rows = rs.fetchall()
 
     def _json_or_raw(v):
@@ -231,28 +231,36 @@ async def _get_events(db: AsyncSession, tenant_id: int, final_code: str):
     return out
 
 
-
 # ----------------------------
 # Documents gắn với batch (qua doc_bundle_id)
 # ----------------------------
-async def _get_docs(db: AsyncSession, tenant_id: int, code: str):
+async def _get_docs(db: AsyncSession, tenant_id: int, ref_code: str):
+    """
+    FIX:
+    - Lấy doc_bundle_id mới nhất trong cả chain batch (2 chiều như _get_events)
+    - Tránh case ref_code là base batch → không tìm thấy documents của batch con.
+    """
     sql = """
+    WITH latest_bundle AS (
+      SELECT doc_bundle_id
+      FROM epcis_events
+      WHERE tenant_id = :t
+        AND (
+          :ref_code LIKE batch_code || '%'
+          OR batch_code LIKE :ref_code || '%'
+        )
+      ORDER BY created_at DESC
+      LIMIT 1
+    )
     SELECT d.id, d.file_name, d.file_hash, d.doc_bundle_id,
            c.status AS vc_status, c.hash_hex AS vc_hash
     FROM documents d
     LEFT JOIN credentials c
       ON c.hash_hex = d.file_hash
     WHERE d.tenant_id = :t
-      AND d.doc_bundle_id = (
-        SELECT doc_bundle_id
-        FROM epcis_events
-        WHERE tenant_id = :t
-          AND batch_code = :b
-        ORDER BY created_at DESC
-        LIMIT 1
-      )
+      AND d.doc_bundle_id = (SELECT doc_bundle_id FROM latest_bundle)
     """
-    rs = await db.execute(text(sql), {"t": tenant_id, "b": code})
+    rs = await db.execute(text(sql), {"t": tenant_id, "ref_code": ref_code})
     rows = rs.fetchall()
     out: list[dict[str, Any]] = []
     for r in rows:
