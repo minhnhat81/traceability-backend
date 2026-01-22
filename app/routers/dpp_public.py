@@ -79,6 +79,48 @@ def _choose_effective_role(batch_code: str, role_from_db: str) -> str:
     return db_role
 
 
+async def _resolve_final_batch_code(db: AsyncSession, ref: str) -> str:
+    """
+    ✅ FIX CỐT LÕI:
+    Khi user mở DPP bằng batch FARM (ref ngắn), nhưng blockchain_proofs thường chỉ được
+    tạo ở FINAL batch (thường có BRAND), backend phải tự resolve ref -> final_ref.
+
+    - Nếu tìm được batch chứa BRAND cùng prefix => dùng batch đó làm final_ref
+    - Nếu không có => fallback giữ nguyên ref
+    """
+    # Lấy tenant_id của ref trước (để không quét toàn DB)
+    sql_tenant = """
+    SELECT tenant_id
+    FROM batches
+    WHERE code = :ref
+    LIMIT 1
+    """
+    rs_t = await db.execute(text(sql_tenant), {"ref": ref})
+    row_t = rs_t.fetchone()
+    if not row_t:
+        return ref
+
+    tenant_id = row_t[0]
+
+    # Tìm final batch: cùng prefix (LIKE ref%) và có BRAND
+    # Ưu tiên code dài nhất (FINAL thường dài nhất)
+    sql = """
+    SELECT code
+    FROM batches
+    WHERE tenant_id = :t
+      AND code LIKE :ref || '%'
+      AND code ILIKE '%BRAND%'
+    ORDER BY LENGTH(code) DESC
+    LIMIT 1
+    """
+    rs = await db.execute(text(sql), {"t": tenant_id, "ref": ref})
+    row = rs.fetchone()
+    if row:
+        return row[0]
+
+    return ref
+
+
 # ----------------------------
 # Blockchain anchor (proof)
 # ----------------------------
@@ -192,7 +234,7 @@ async def _get_batch(db: AsyncSession, code: str):
 async def _get_events(db: AsyncSession, tenant_id: int, final_code: str):
     """
     Lấy toàn bộ EPCIS events cho cả chuỗi batch:
-    - Mọi batch có code là prefix của final_code
+    - Mọi batch có cùng "root prefix" (trước -SUPPLIER-) với final_code
       (vd: GARMENT-002, GARMENT-002-SUPPLIER-..., ...-MANUFACTURER-..., ...-BRAND-...)
     - Kèm owner_role của batch để biết event thuộc tầng nào.
     - ✅ FIX: Nếu owner_role bị sai do clone (thường FARM), sẽ suy luận từ batch_code.
@@ -257,6 +299,10 @@ async def _get_events(db: AsyncSession, tenant_id: int, final_code: str):
         owner_role_db = m["owner_role"]
         owner_role_effective = _choose_effective_role(batch_code, owner_role_db)
 
+        # ✅ IMPORTANT:
+        # Nhiều frontend vẫn còn đọc batch_owner_role / batch_owner_role ưu tiên,
+        # nên để tránh “mọi event về FARM”, ta set batch_owner_role = effective.
+        # Giữ raw DB role riêng để debug.
         out.append(
             {
                 "id": m["id"],
@@ -284,8 +330,9 @@ async def _get_events(db: AsyncSession, tenant_id: int, final_code: str):
                 "raw_payload": m["raw_payload"],
 
                 # thông tin để DppPage nhóm theo tầng
-                "owner_role": owner_role_effective,      # ✅ FIX: role đã được sửa/chuẩn hoá
-                "batch_owner_role": owner_role_db,       # (optional) giữ lại để debug
+                "owner_role": owner_role_effective,          # ✅ FIX: role đã được sửa/chuẩn hoá
+                "batch_owner_role": owner_role_effective,    # ✅ FIX: để tương thích frontend cũ
+                "batch_owner_role_raw": owner_role_db,       # (optional) debug
                 "batch_code": batch_code,
             }
         )
@@ -344,9 +391,16 @@ async def dpp_public(
 
     - lite: chỉ trả thông tin blockchain (proof)
     - full: batch + blockchain + EPCIS events (đầy đủ cột) + documents
+
+    ✅ FIX CỐT LÕI:
+    Nếu ref là FARM batch, backend sẽ resolve sang FINAL batch (thường chứa BRAND)
+    để lấy đúng anchor + đúng chuỗi events/docs.
     """
-    # 1) Blockchain proof
-    anchor = await _get_anchor(db, ref)
+    # ✅ Resolve ref -> final_ref (để tránh lỗi khi user mở DPP từ FARM)
+    final_ref = await _resolve_final_batch_code(db, ref)
+
+    # 1) Blockchain proof (LUÔN theo final_ref)
+    anchor = await _get_anchor(db, final_ref)
     if not anchor:
         raise HTTPException(404, "No blockchain anchor found")
 
@@ -354,23 +408,26 @@ async def dpp_public(
     if mode == "lite":
         return anchor
 
-    # 2) full mode -> batch + events + docs
-    batch = await _get_batch(db, ref)
+    # 2) full mode -> batch + events + docs (LUÔN theo final_ref)
+    batch = await _get_batch(db, final_ref)
     if not batch:
         raise HTTPException(404, "Batch not found")
 
     tenant_id = batch["tenant_id"]
-    events = await _get_events(db, tenant_id, ref)
-    docs = await _get_docs(db, tenant_id, ref)
+    events = await _get_events(db, tenant_id, final_ref)
+    docs = await _get_docs(db, tenant_id, final_ref)
 
     # dpp_json: payload tổng hợp (cho dev / debug, frontend vẫn render chi tiết từng field)
     dpp_json = {
-        "id": f"DPP-{ref}",
+        "id": f"DPP-{final_ref}",
         "product": batch["product"],
         "batch": batch,
         "events": events,
         "documents": docs,
         "blockchain": anchor,
+        # debug nhẹ để bạn kiểm tra nhanh
+        "ref_input": ref,
+        "ref_final": final_ref,
     }
 
     return {
