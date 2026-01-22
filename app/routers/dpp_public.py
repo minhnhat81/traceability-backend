@@ -1,4 +1,6 @@
+# app/routers/dpp_public.py
 from __future__ import annotations
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
@@ -11,6 +13,7 @@ from .blockchain import _build_and_optionally_upload_dpp
 
 router = APIRouter(prefix="/api/public", tags=["dpp-public"])
 
+
 # ----------------------------
 # Helpers chung
 # ----------------------------
@@ -18,6 +21,62 @@ def _dt(v):
     if not v:
         return None
     return v.isoformat() if isinstance(v, datetime) else str(v)
+
+
+def _normalize_role(v: Any) -> str:
+    if not v:
+        return ""
+    return str(v).strip().upper()
+
+
+def _infer_role_from_batch_code(code: str) -> str:
+    """
+    ✅ FIX: suy luận tầng từ batch_code để chống lỗi Clone giữ owner_role=FARM.
+    Ví dụ:
+      GARMENT-001                          -> FARM
+      GARMENT-001-SUPPLIER-...             -> SUPPLIER
+      GARMENT-001-...-MANUFACTURER-...     -> MANUFACTURER
+      GARMENT-001-...-BRAND-...            -> BRAND
+    """
+    c = _normalize_role(code)
+
+    # ưu tiên các tầng "cao" trước để tránh match nhầm
+    if "BRAND" in c:
+        return "BRAND"
+    if "MANUFACTURER" in c or "-MFG-" in c or " MFG " in c or c.endswith("-MFG"):
+        return "MANUFACTURER"
+    if "SUPPLIER" in c:
+        return "SUPPLIER"
+    if "FARM" in c:
+        return "FARM"
+    return "FARM"
+
+
+def _choose_effective_role(batch_code: str, role_from_db: str) -> str:
+    """
+    ✅ FIX: Nếu role DB bị sai (hay gặp: FARM) nhưng batch_code thể hiện tầng khác,
+    thì override theo batch_code.
+    """
+    db_role = _normalize_role(role_from_db)
+    inferred = _infer_role_from_batch_code(batch_code)
+
+    # nếu db_role rỗng -> dùng inferred
+    if not db_role:
+        return inferred
+
+    # nếu db_role là FARM nhưng inferred là tầng khác -> override
+    if db_role == "FARM" and inferred != "FARM":
+        return inferred
+
+    # nếu db_role không thuộc tập hợp known -> dùng inferred
+    if db_role not in {"FARM", "SUPPLIER", "MANUFACTURER", "BRAND"}:
+        return inferred
+
+    # nếu db_role khác inferred (và inferred rõ ràng), ưu tiên inferred để chống clone lỗi
+    if inferred in {"SUPPLIER", "MANUFACTURER", "BRAND"} and db_role != inferred:
+        return inferred
+
+    return db_role
 
 
 # ----------------------------
@@ -85,9 +144,7 @@ async def _get_anchor(db: AsyncSession, ref: str):
         "created_at": _dt(m2["created_at"]),
         "meta": json.loads(m2["meta"] or "{}"),
         "ipfs_cid": m2["ipfs_cid"],
-        "ipfs_gateway": f"https://ipfs.io/ipfs/{m2['ipfs_cid']}"
-        if m2["ipfs_cid"]
-        else None,
+        "ipfs_gateway": f"https://ipfs.io/ipfs/{m2['ipfs_cid']}" if m2["ipfs_cid"] else None,
     }
 
 
@@ -132,13 +189,13 @@ async def _get_batch(db: AsyncSession, code: str):
 # ----------------------------
 # EPCIS Events – LẤY ĐỦ CHUỖI FARM → SUPPLIER → MFG → BRAND
 # ----------------------------
-async def _get_events(db: AsyncSession, tenant_id: int, ref_code: str):
+async def _get_events(db: AsyncSession, tenant_id: int, final_code: str):
     """
-    FIX CHUẨN:
-    - ref_code có thể là base batch (FABRIC-002) hoặc final batch code dài nhất.
-    - Cần lấy tất cả events thuộc "chain" bằng 2 chiều:
-        1) ref_code LIKE batch_code%  (batch_code là prefix của ref_code)
-        2) batch_code LIKE ref_code%  (batch_code là extension của ref_code)
+    Lấy toàn bộ EPCIS events cho cả chuỗi batch:
+    - Mọi batch có code là prefix của final_code
+      (vd: GARMENT-002, GARMENT-002-SUPPLIER-..., ...-MANUFACTURER-..., ...-BRAND-...)
+    - Kèm owner_role của batch để biết event thuộc tầng nào.
+    - ✅ FIX: Nếu owner_role bị sai do clone (thường FARM), sẽ suy luận từ batch_code.
     """
     sql = """
     SELECT
@@ -173,14 +230,12 @@ async def _get_events(db: AsyncSession, tenant_id: int, ref_code: str):
       ON b.code = e.batch_code
      AND b.tenant_id = e.tenant_id
     WHERE e.tenant_id = :t
-      AND (
-        :ref_code LIKE e.batch_code || '%'
-        OR e.batch_code LIKE :ref_code || '%'
-      )
+      -- mọi batch mà code là prefix của final_code
+      AND :final_code LIKE e.batch_code || '%'
     ORDER BY e.event_time ASC, e.id ASC
     """
 
-    rs = await db.execute(text(sql), {"t": tenant_id, "ref_code": ref_code})
+    rs = await db.execute(text(sql), {"t": tenant_id, "final_code": final_code})
     rows = rs.fetchall()
 
     def _json_or_raw(v):
@@ -197,6 +252,11 @@ async def _get_events(db: AsyncSession, tenant_id: int, ref_code: str):
     out: list[dict[str, Any]] = []
     for r in rows:
         m = r._mapping
+
+        batch_code = m["batch_code"]
+        owner_role_db = m["owner_role"]
+        owner_role_effective = _choose_effective_role(batch_code, owner_role_db)
+
         out.append(
             {
                 "id": m["id"],
@@ -224,8 +284,9 @@ async def _get_events(db: AsyncSession, tenant_id: int, ref_code: str):
                 "raw_payload": m["raw_payload"],
 
                 # thông tin để DppPage nhóm theo tầng
-                "owner_role": m["owner_role"],
-                "batch_code": m["batch_code"],
+                "owner_role": owner_role_effective,      # ✅ FIX: role đã được sửa/chuẩn hoá
+                "batch_owner_role": owner_role_db,       # (optional) giữ lại để debug
+                "batch_code": batch_code,
             }
         )
     return out
@@ -234,33 +295,24 @@ async def _get_events(db: AsyncSession, tenant_id: int, ref_code: str):
 # ----------------------------
 # Documents gắn với batch (qua doc_bundle_id)
 # ----------------------------
-async def _get_docs(db: AsyncSession, tenant_id: int, ref_code: str):
-    """
-    FIX:
-    - Lấy doc_bundle_id mới nhất trong cả chain batch (2 chiều như _get_events)
-    - Tránh case ref_code là base batch → không tìm thấy documents của batch con.
-    """
+async def _get_docs(db: AsyncSession, tenant_id: int, code: str):
     sql = """
-    WITH latest_bundle AS (
-      SELECT doc_bundle_id
-      FROM epcis_events
-      WHERE tenant_id = :t
-        AND (
-          :ref_code LIKE batch_code || '%'
-          OR batch_code LIKE :ref_code || '%'
-        )
-      ORDER BY created_at DESC
-      LIMIT 1
-    )
     SELECT d.id, d.file_name, d.file_hash, d.doc_bundle_id,
            c.status AS vc_status, c.hash_hex AS vc_hash
     FROM documents d
     LEFT JOIN credentials c
       ON c.hash_hex = d.file_hash
     WHERE d.tenant_id = :t
-      AND d.doc_bundle_id = (SELECT doc_bundle_id FROM latest_bundle)
+      AND d.doc_bundle_id = (
+        SELECT doc_bundle_id
+        FROM epcis_events
+        WHERE tenant_id = :t
+          AND batch_code = :b
+        ORDER BY created_at DESC
+        LIMIT 1
+      )
     """
-    rs = await db.execute(text(sql), {"t": tenant_id, "ref_code": ref_code})
+    rs = await db.execute(text(sql), {"t": tenant_id, "b": code})
     rows = rs.fetchall()
     out: list[dict[str, Any]] = []
     for r in rows:
@@ -373,17 +425,13 @@ async def get_dpp_list(db: AsyncSession = Depends(get_db)):
 # Route legacy tương thích backend cũ
 # ----------------------------
 @router.get("/dpp-legacy/{batch_code}")
-async def public_dpp_compatible(
-    batch_code: str, db: AsyncSession = Depends(get_db)
-):
+async def public_dpp_compatible(batch_code: str, db: AsyncSession = Depends(get_db)):
     """
     Compatible với old frontend: /api/public/dpp-legacy/{batch_code}
     Dùng chung helper _build_and_optionally_upload_dpp ở blockchain.py
     """
     try:
-        return await _build_and_optionally_upload_dpp(
-            db, batch_code, upload=False
-        )
+        return await _build_and_optionally_upload_dpp(db, batch_code, upload=False)
     except HTTPException as e:
         raise e
     except Exception as e:
