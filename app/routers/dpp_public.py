@@ -31,48 +31,32 @@ def _normalize_role(v: Any) -> str:
 
 def _infer_role_from_batch_code(code: str) -> str:
     """
-    ✅ FIX: suy luận tầng từ batch_code để chống lỗi Clone giữ owner_role=FARM.
-    Ví dụ:
-      GARMENT-001                          -> FARM
-      GARMENT-001-SUPPLIER-...             -> SUPPLIER
-      GARMENT-001-...-MANUFACTURER-...     -> MANUFACTURER
-      GARMENT-001-...-BRAND-...            -> BRAND
+    Suy luận tầng từ batch_code để chống lỗi Clone giữ owner_role=FARM
     """
     c = _normalize_role(code)
 
-    # ưu tiên các tầng "cao" trước để tránh match nhầm
     if "BRAND" in c:
         return "BRAND"
-    if "MANUFACTURER" in c or "-MFG-" in c or " MFG " in c or c.endswith("-MFG"):
+    if "MANUFACTURER" in c or "-MFG-" in c or c.endswith("-MFG"):
         return "MANUFACTURER"
     if "SUPPLIER" in c:
         return "SUPPLIER"
-    if "FARM" in c:
-        return "FARM"
     return "FARM"
 
 
 def _choose_effective_role(batch_code: str, role_from_db: str) -> str:
-    """
-    ✅ FIX: Nếu role DB bị sai (hay gặp: FARM) nhưng batch_code thể hiện tầng khác,
-    thì override theo batch_code.
-    """
     db_role = _normalize_role(role_from_db)
     inferred = _infer_role_from_batch_code(batch_code)
 
-    # nếu db_role rỗng -> dùng inferred
     if not db_role:
         return inferred
 
-    # nếu db_role là FARM nhưng inferred là tầng khác -> override
     if db_role == "FARM" and inferred != "FARM":
         return inferred
 
-    # nếu db_role không thuộc tập hợp known -> dùng inferred
     if db_role not in {"FARM", "SUPPLIER", "MANUFACTURER", "BRAND"}:
         return inferred
 
-    # nếu db_role khác inferred (và inferred rõ ràng), ưu tiên inferred để chống clone lỗi
     if inferred in {"SUPPLIER", "MANUFACTURER", "BRAND"} and db_role != inferred:
         return inferred
 
@@ -83,7 +67,6 @@ def _choose_effective_role(batch_code: str, role_from_db: str) -> str:
 # Blockchain anchor (proof)
 # ----------------------------
 async def _get_anchor(db: AsyncSession, ref: str):
-    # 1) Ưu tiên bảng mới blockchain_proofs
     sql_bp = """
     SELECT
         tenant_id,
@@ -118,7 +101,6 @@ async def _get_anchor(db: AsyncSession, ref: str):
             "ipfs_gateway": None,
         }
 
-    # 2) Fallback: blockchain_anchors cũ
     sql_ba = """
     SELECT id, tenant_id, ref, tx_hash, network, batch_hash, block_number,
            status, created_at, meta, ipfs_cid
@@ -157,8 +139,8 @@ async def _get_batch(db: AsyncSession, code: str):
         b.tenant_id, b.code, b.product_code, b.mfg_date, b.country,
         b.quantity, b.unit,
         p.name AS product_name,
-        NULL AS product_brand,   -- bảng products hiện chưa có cột brand
-        NULL AS product_gtin     -- bảng products hiện chưa có cột gtin
+        NULL AS product_brand,
+        NULL AS product_gtin
     FROM batches b
     LEFT JOIN products p
       ON p.code = b.product_code AND p.tenant_id = b.tenant_id
@@ -187,16 +169,9 @@ async def _get_batch(db: AsyncSession, code: str):
 
 
 # ----------------------------
-# EPCIS Events – LẤY ĐỦ CHUỖI FARM → SUPPLIER → MFG → BRAND
+# EPCIS Events – FIX CLONE CHUỖI
 # ----------------------------
 async def _get_events(db: AsyncSession, tenant_id: int, final_code: str):
-    """
-    Lấy toàn bộ EPCIS events cho cả chuỗi batch:
-    - Mọi batch có code là prefix của final_code
-      (vd: GARMENT-002, GARMENT-002-SUPPLIER-..., ...-MANUFACTURER-..., ...-BRAND-...)
-    - Kèm owner_role của batch để biết event thuộc tầng nào.
-    - ✅ FIX: Nếu owner_role bị sai do clone (thường FARM), sẽ suy luận từ batch_code.
-    """
     sql = """
     SELECT
         e.id,
@@ -223,15 +198,15 @@ async def _get_events(db: AsyncSession, tenant_id: int, final_code: str):
         e.verify_error,
         e.raw_payload,
 
-        b.owner_role AS owner_role,   -- tầng: FARM / SUPPLIER / MANUFACTURER / BRAND
-        b.code       AS batch_code    -- batch cụ thể của event
+        b.owner_role AS owner_role,
+        b.code       AS batch_code
     FROM epcis_events e
     JOIN batches b
       ON b.code = e.batch_code
      AND b.tenant_id = e.tenant_id
     WHERE e.tenant_id = :t
-      -- mọi batch mà code là prefix của final_code
-      AND :final_code LIKE e.batch_code || '%'
+      -- ✅ FIX QUAN TRỌNG
+      AND e.batch_code LIKE :final_code || '%'
     ORDER BY e.event_time ASC, e.id ASC
     """
 
@@ -239,7 +214,6 @@ async def _get_events(db: AsyncSession, tenant_id: int, final_code: str):
     rows = rs.fetchall()
 
     def _json_or_raw(v):
-        """Cột JSON có thể đang là text, dict hoặc list – chuẩn hoá về object."""
         if v is None:
             return None
         if isinstance(v, (dict, list)):
@@ -270,7 +244,6 @@ async def _get_events(db: AsyncSession, tenant_id: int, final_code: str):
                 "event_time": _dt(m["event_time"]),
                 "biz_location": m["biz_location"],
                 "read_point": m["read_point"],
-
                 "epc_list": _json_or_raw(m["epc_list"]),
                 "ilmd": _json_or_raw(m["ilmd"]),
                 "extensions": _json_or_raw(m["extensions"]),
@@ -282,10 +255,8 @@ async def _get_events(db: AsyncSession, tenant_id: int, final_code: str):
                 "verified": m["verified"],
                 "verify_error": m["verify_error"],
                 "raw_payload": m["raw_payload"],
-
-                # thông tin để DppPage nhóm theo tầng
-                "owner_role": owner_role_effective,      # ✅ FIX: role đã được sửa/chuẩn hoá
-                "batch_owner_role": owner_role_db,       # (optional) giữ lại để debug
+                "owner_role": owner_role_effective,
+                "batch_owner_role": owner_role_db,
                 "batch_code": batch_code,
             }
         )
@@ -293,7 +264,7 @@ async def _get_events(db: AsyncSession, tenant_id: int, final_code: str):
 
 
 # ----------------------------
-# Documents gắn với batch (qua doc_bundle_id)
+# Documents
 # ----------------------------
 async def _get_docs(db: AsyncSession, tenant_id: int, code: str):
     sql = """
@@ -314,47 +285,35 @@ async def _get_docs(db: AsyncSession, tenant_id: int, code: str):
     """
     rs = await db.execute(text(sql), {"t": tenant_id, "b": code})
     rows = rs.fetchall()
-    out: list[dict[str, Any]] = []
-    for r in rows:
-        m = r._mapping
-        out.append(
-            {
-                "id": m["id"],
-                "file_name": m["file_name"],
-                "file_hash": m["file_hash"],
-                "doc_bundle_id": m["doc_bundle_id"],
-                "vc_status": m["vc_status"],
-                "vc_hash": m["vc_hash"],
-            }
-        )
-    return out
+    return [
+        {
+            "id": r._mapping["id"],
+            "file_name": r._mapping["file_name"],
+            "file_hash": r._mapping["file_hash"],
+            "doc_bundle_id": r._mapping["doc_bundle_id"],
+            "vc_status": r._mapping["vc_status"],
+            "vc_hash": r._mapping["vc_hash"],
+        }
+        for r in rows
+    ]
 
 
 # ----------------------------
-# PUBLIC API: DPP Landing (lite / full)
+# PUBLIC API
 # ----------------------------
 @router.get("/dpp/{ref}")
 async def dpp_public(
     ref: str,
-    mode: str = Query("lite", description="lite or full"),
+    mode: str = Query("lite"),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    /api/public/dpp/{ref}?mode=lite|full
-
-    - lite: chỉ trả thông tin blockchain (proof)
-    - full: batch + blockchain + EPCIS events (đầy đủ cột) + documents
-    """
-    # 1) Blockchain proof
     anchor = await _get_anchor(db, ref)
     if not anchor:
         raise HTTPException(404, "No blockchain anchor found")
 
-    # Lite mode -> chỉ blockchain + ipfs
     if mode == "lite":
         return anchor
 
-    # 2) full mode -> batch + events + docs
     batch = await _get_batch(db, ref)
     if not batch:
         raise HTTPException(404, "Batch not found")
@@ -363,76 +322,29 @@ async def dpp_public(
     events = await _get_events(db, tenant_id, ref)
     docs = await _get_docs(db, tenant_id, ref)
 
-    # dpp_json: payload tổng hợp (cho dev / debug, frontend vẫn render chi tiết từng field)
-    dpp_json = {
-        "id": f"DPP-{ref}",
-        "product": batch["product"],
-        "batch": batch,
-        "events": events,
-        "documents": docs,
-        "blockchain": anchor,
-    }
-
     return {
         "batch": batch,
         "blockchain": anchor,
         "events": events,
         "documents": docs,
-        "dpp_json": dpp_json,
+        "dpp_json": {
+            "id": f"DPP-{ref}",
+            "batch": batch,
+            "events": events,
+            "documents": docs,
+            "blockchain": anchor,
+        },
     }
 
 
 # ----------------------------
-# DPP Registry list (dpp-list)
-# ----------------------------
-@router.get("/dpp-list")
-async def get_dpp_list(db: AsyncSession = Depends(get_db)):
-    """
-    Danh sách các batch đã có proof trên blockchain để hiển thị ở DppListPage.
-    """
-    sql = """
-        SELECT
-            bp.tenant_id,
-            bp.batch_code AS ref,
-            bp.network,
-            bp.tx_hash,
-            bp.block_number,
-            bp.root_hash,
-            bp.status,
-            bp.published_at,
-            bp.contract_address,
-            ba.ipfs_cid,
-            b.product_code,
-            p.name AS product_name,
-            NULL  AS product_brand
-        FROM blockchain_proofs bp
-        LEFT JOIN blockchain_anchors ba
-          ON ba.ref = bp.batch_code
-         AND ba.tenant_id = bp.tenant_id
-        LEFT JOIN batches b
-          ON b.code = bp.batch_code
-         AND b.tenant_id = bp.tenant_id
-        LEFT JOIN products p
-          ON p.code = b.product_code
-         AND p.tenant_id = b.tenant_id
-        ORDER BY bp.created_at DESC
-    """
-    res = await db.execute(text(sql))
-    return res.mappings().all()
-
-
-# ----------------------------
-# Route legacy tương thích backend cũ
+# Legacy
 # ----------------------------
 @router.get("/dpp-legacy/{batch_code}")
 async def public_dpp_compatible(batch_code: str, db: AsyncSession = Depends(get_db)):
-    """
-    Compatible với old frontend: /api/public/dpp-legacy/{batch_code}
-    Dùng chung helper _build_and_optionally_upload_dpp ở blockchain.py
-    """
     try:
         return await _build_and_optionally_upload_dpp(db, batch_code, upload=False)
-    except HTTPException as e:
-        raise e
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"Failed to build DPP: {str(e)}")
