@@ -230,8 +230,8 @@ async def _get_events(db: AsyncSession, tenant_id: int, final_code: str):
       ON b.code = e.batch_code
      AND b.tenant_id = e.tenant_id
     WHERE e.tenant_id = :t
-      -- mọi batch mà code là prefix của final_code
-      AND :final_code LIKE e.batch_code || '%'
+      AND split_part(e.batch_code, '-SUPPLIER-', 1)
+          = split_part(:final_code, '-SUPPLIER-', 1)
     ORDER BY e.event_time ASC, e.id ASC
     """
 
