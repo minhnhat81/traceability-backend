@@ -185,7 +185,7 @@ async def capture_event(body: dict, db: AsyncSession = Depends(get_db), user=Dep
 
         # Lấy thông tin batch
         qb = await db.execute(text("""
-            SELECT owner_role, status
+            SELECT owner_role, status, next_level_cloned_at
             FROM batches
             WHERE tenant_id=:t AND code=:b
             LIMIT 1
@@ -196,6 +196,27 @@ async def capture_event(body: dict, db: AsyncSession = Depends(get_db), user=Dep
 
         owner_role = (b["owner_role"] or "").upper()
         status = (b["status"] or "").upper()
+        next_level_cloned_at = b.get("next_level_cloned_at")
+
+        # =====================================================
+        # 🚨 ENFORCE CLONE TO NEXT LEVEL (CORE BUSINESS RULE)
+        # =====================================================
+        if not (is_superadmin or is_admin):
+
+            role_order = ["FARM", "SUPPLIER", "MANUFACTURER", "BRAND"]
+
+            if owner_role in role_order and user_role in role_order:
+                owner_idx = role_order.index(owner_role)
+                user_idx = role_order.index(user_role)
+
+                # user đang ở tầng SAU
+                if user_idx > owner_idx:
+                    if not next_level_cloned_at:
+                        raise HTTPException(
+                            400,
+                            "Previous level has NOT confirmed batch transfer (Clone to next level required)"
+                        )
+
 
         # ✅ Superadmin và Admin được phép tạo EPCIS cho mọi batch
         if is_superadmin or is_admin:
