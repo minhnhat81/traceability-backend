@@ -458,16 +458,43 @@ async def list_events(
         # =====================================================
 
         # ---- Add EPCIS Event ----
+        # --- Meta cho nút Add EPCIS Event ---
         can_create = False
+
         if is_superadmin or is_admin:
             can_create = True
+
         elif eff_owner and eff_status:
-            # Chủ batch
-            if user_role == eff_owner and eff_status not in ("READY_FOR_NEXT_LEVEL", "CLOSED"):
-                can_create = True
-            # Tầng kế tiếp: CHỈ KHI ĐÃ CLONE
-            elif user_role != eff_owner and meta_cloned:
-                can_create = True
+            # ============================
+            # FARM
+            # ============================
+            if user_role == "FARM":
+                # Farm chỉ được tạo EPCIS khi batch chưa clone
+                if eff_owner == "FARM" and eff_status not in ("CLOSED",):
+                    can_create = True
+
+            # ============================
+            # SUPPLIER
+            # ============================
+            elif user_role == "SUPPLIER":
+                # ❗ CHỈ ĐƯỢC PHÉP KHI FARM ĐÃ CLONE
+                if eff_owner == "FARM" and meta_cloned:
+                    can_create = True
+
+            # ============================
+            # MANUFACTURER
+            # ============================
+            elif user_role == "MANUFACTURER":
+                if eff_owner == "SUPPLIER" and meta_cloned:
+                    can_create = True
+
+            # ============================
+            # BRAND
+            # ============================
+            elif user_role == "BRAND":
+                if eff_owner == "MANUFACTURER" and meta_cloned:
+                    can_create = True
+
 
         # ---- Clone to Next Level ----
         can_clone = False
