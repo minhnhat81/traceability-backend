@@ -201,21 +201,37 @@ async def capture_event(body: dict, db: AsyncSession = Depends(get_db), user=Dep
         # =====================================================
         # 🚨 ENFORCE CLONE TO NEXT LEVEL (CORE BUSINESS RULE)
         # =====================================================
+        # =========================
+        # CHẶN EPCIS THEO CLONE FLOW
+        # =========================
+
         if not (is_superadmin or is_admin):
 
-            role_order = ["FARM", "SUPPLIER", "MANUFACTURER", "BRAND"]
+            # ===== FARM =====
+            if owner_role == "FARM":
+                # Farm chỉ được ghi EPCIS khi CHƯA clone
+                if next_level_cloned_at:
+                    raise HTTPException(
+                        403,
+                        "Farm batch already cloned to next level — cannot add EPCIS events"
+                    )
 
-            if owner_role in role_order and user_role in role_order:
-                owner_idx = role_order.index(owner_role)
-                user_idx = role_order.index(user_role)
+            # ===== SUPPLIER =====
+            elif owner_role == "SUPPLIER":
+                # Supplier CHỈ được ghi EPCIS nếu FARM đã clone
+                if not next_level_cloned_at:
+                    raise HTTPException(
+                        403,
+                        "Farm has not cloned batch yet — supplier cannot add EPCIS events"
+                    )
 
-                # user đang ở tầng SAU
-                if user_idx > owner_idx:
-                    if not next_level_cloned_at:
-                        raise HTTPException(
-                            400,
-                            "Previous level has NOT confirmed batch transfer (Clone to next level required)"
-                        )
+            # ===== MANUFACTURER =====
+            elif owner_role == "MANUFACTURER":
+                if not next_level_cloned_at:
+                    raise HTTPException(
+                        403,
+                        "Previous level has not cloned batch yet"
+                    )
 
 
         # ✅ Superadmin và Admin được phép tạo EPCIS cho mọi batch
