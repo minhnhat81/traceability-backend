@@ -308,27 +308,12 @@ async def list_events(
     db: AsyncSession = Depends(get_db),
     user=Depends(verify_jwt),
 ):
-    """
-    Logic quyền EPCIS (chuẩn theo workflow Farm -> Supplier):
-
-    - CLOSED → khóa tất cả.
-    - OPEN / IN_PROGRESS → chỉ ai tạo event thì được sửa/xóa.
-    - READY_FOR_NEXT_LEVEL:
-        * Farm (batch_owner)  -> khóa toàn bộ.
-        * Supplier (không phải batch_owner):
-            - Nếu chưa clone -> chỉ sửa/xóa event của Supplier.
-            - Nếu đã clone   -> khóa toàn bộ.
-
-    ✅ Bổ sung:
-    - Dùng VIEW `v_batch_overview` để hiển thị định lượng batch:
-      quantity, used_quantity, remaining_quantity, unit, last_event_time
-    - Thêm quyền superadmin được phép xem/sửa/xóa tất cả.
-    """
     try:
         tenant_user = int(user.get("tenant_id") or 0)
         user_role = (user.get("role") or "").upper()
         is_superadmin = (user_role == "SUPERADMIN")
         is_admin = (user_role == "ADMIN")
+
         # --- Scope ---
         result = scope_where_clause(db, user, "events")
         where_clause = await result if hasattr(result, "__await__") else (result or "1=1")
@@ -338,57 +323,77 @@ async def list_events(
         has_tenant_scope = "e.tenant_id" in where_clause.lower()
         params = {}
 
-        # --- Lấy meta batch (owner, status, clone flag + quantity info) ---
+        # --- Batch meta ---
         meta_owner = meta_status = None
         meta_cloned = None
         meta_quantity = meta_remaining = meta_used = None
         meta_unit = None
 
         if batch_code:
-            qb = await db.execute(text("""
-                SELECT v.owner_role, v.status, b.next_level_cloned_at,
-                       v.quantity, v.used_quantity, v.remaining_quantity, v.unit
-                FROM v_batch_overview v
-                JOIN batches b
-                  ON v.batch_code=b.code AND v.tenant_id=b.tenant_id
-                WHERE v.tenant_id=:t AND v.batch_code=:b
-                LIMIT 1
-            """), {"t": tenant_id or tenant_user, "b": batch_code})
-            br = qb.mappings().first()
-            if br:
-                meta_owner = (br["owner_role"] or "").upper()
-                meta_status = (br["status"] or "").upper()
-                meta_cloned = br["next_level_cloned_at"]
-                meta_quantity = float(br["quantity"] or 0)
-                meta_used = float(br["used_quantity"] or 0)
-                meta_remaining = float(br["remaining_quantity"] or 0)
-                meta_unit = br["unit"] or ""
+            qb = await db.execute(
+                text(
+                    """
+                    SELECT v.owner_role,
+                           v.status,
+                           b.next_level_cloned_at,
+                           v.quantity,
+                           v.used_quantity,
+                           v.remaining_quantity,
+                           v.unit
+                    FROM v_batch_overview v
+                    JOIN batches b
+                      ON v.batch_code=b.code
+                     AND v.tenant_id=b.tenant_id
+                    WHERE v.tenant_id=:t
+                      AND v.batch_code=:b
+                    LIMIT 1
+                    """
+                ),
+                {"t": tenant_id or tenant_user, "b": batch_code},
+            )
+            b = qb.mappings().first()
+            if b:
+                meta_owner = (b["owner_role"] or "").upper()
+                meta_status = (b["status"] or "").upper()
+                meta_cloned = b["next_level_cloned_at"]
+                meta_quantity = float(b["quantity"] or 0)
+                meta_used = float(b["used_quantity"] or 0)
+                meta_remaining = float(b["remaining_quantity"] or 0)
+                meta_unit = b["unit"] or ""
 
-        # --- Truy vấn EPCIS event ---
+        # --- Query EPCIS events ---
         q = f"""
-            SELECT e.id, e.tenant_id, e.owner_role AS event_owner_role,
-                   e.event_type, e.batch_code, e.product_code, e.material_name,
-                   e.event_time, e.action, e.biz_step, e.disposition,
-                   e.event_id, e.doc_bundle_id, e.created_at,
-                   e.read_point, e.biz_location,
-                   e.epc_list, e.biz_transaction_list, e.ilmd,
-                   COALESCE(v.owner_role, 'UNKNOWN') AS batch_owner_role_join,
-                   COALESCE(v.status, '') AS batch_status_join,
-                   COALESCE(v.quantity, 0) AS batch_quantity,
-                   COALESCE(v.remaining_quantity, 0) AS remaining_quantity,
-                   COALESCE(v.used_quantity, 0) AS used_quantity,
-                   COALESCE(v.unit, '') AS batch_unit
+            SELECT e.id,
+                   e.tenant_id,
+                   e.owner_role AS event_owner_role,
+                   e.event_type,
+                   e.batch_code,
+                   e.product_code,
+                   e.material_name,
+                   e.event_time,
+                   e.action,
+                   e.biz_step,
+                   e.disposition,
+                   e.event_id,
+                   e.doc_bundle_id,
+                   e.created_at,
+                   e.read_point,
+                   e.biz_location,
+                   e.epc_list,
+                   e.biz_transaction_list,
+                   e.ilmd
             FROM epcis_events e
-            LEFT JOIN v_batch_overview v
-              ON e.batch_code=v.batch_code AND e.tenant_id=v.tenant_id
             WHERE {where_clause}
         """
+
         if not has_tenant_scope:
             q += " AND e.tenant_id=:tenant_id"
             params["tenant_id"] = tenant_id or tenant_user
+
         if batch_code:
             q += " AND e.batch_code=:batch_code"
             params["batch_code"] = batch_code
+
         q += " ORDER BY e.created_at DESC LIMIT 200"
 
         res = await safe_execute_select(db, q, params)
@@ -406,29 +411,25 @@ async def list_events(
         items = []
         for r in rows:
             event_owner = (r["event_owner_role"] or "").upper()
-            row_b_owner = (r["batch_owner_role_join"] or "").upper()
-            row_b_status = (r["batch_status_join"] or "").upper()
-
-            batch_owner = eff_owner or row_b_owner
-            batch_status = eff_status or row_b_status
 
             editable = deletable = False
 
-            # ----- PHÂN QUYỀN CHI TIẾT -----
+            # ---------- PERMISSION ----------
             if is_superadmin or is_admin:
                 editable = deletable = True
             else:
-                if batch_status == "CLOSED":
+                if eff_status == "CLOSED":
                     editable = deletable = False
-                elif batch_status == "READY_FOR_NEXT_LEVEL":
-                    if user_role == batch_owner:
+
+                elif eff_status == "READY_FOR_NEXT_LEVEL":
+                    # Chủ batch → khóa
+                    if user_role == eff_owner:
                         editable = deletable = False
                     else:
-                        if not meta_cloned:  # chưa clone sang level tiếp theo
-                            if event_owner == user_role:
-                                editable = deletable = True
-                        else:
-                            editable = deletable = False
+                        # Tầng sau: chỉ sửa khi CHƯA clone
+                        if not meta_cloned and event_owner == user_role:
+                            editable = deletable = True
+
                 else:
                     # OPEN / IN_PROGRESS
                     if event_owner == user_role:
@@ -439,49 +440,50 @@ async def list_events(
             d["biz_transaction_list"] = j(d.get("biz_transaction_list"))
             d["ilmd"] = j(d.get("ilmd"))
 
-            # --- Thông tin batch ---
-            batch_qty = float(r.get("batch_quantity") or 0)
-            used_qty = float(r.get("used_quantity") or 0)
-            remaining_qty = float(r.get("remaining_quantity") or 0)
-            unit = r.get("batch_unit") or meta_unit or ""
-
-            d["batch_quantity"] = batch_qty
-            d["used_quantity"] = used_qty
-            d["remaining_quantity"] = remaining_qty
-            d["unit"] = unit
+            d["batch_quantity"] = meta_quantity
+            d["used_quantity"] = meta_used
+            d["remaining_quantity"] = meta_remaining
+            d["unit"] = meta_unit
 
             d["owner_role"] = event_owner
-            d["batch_owner_role"] = batch_owner
-            d["batch_status"] = batch_status
+            d["batch_owner_role"] = eff_owner
+            d["batch_status"] = eff_status
             d["editable"] = bool(editable)
             d["deletable"] = bool(deletable)
+
             items.append(d)
 
-        # --- Meta cho nút Add EPCIS Event ---
+        # =====================================================
+        # ✅ META ĐIỀU KHIỂN UI (FIX TRIỆT ĐỂ)
+        # =====================================================
+
+        # ---- Add EPCIS Event ----
         can_create = False
         if is_superadmin or is_admin:
             can_create = True
         elif eff_owner and eff_status:
-            if (
-                eff_owner == "FARM"
-                and eff_status == "READY_FOR_NEXT_LEVEL"
-                and user_role == "SUPPLIER"
-                and not meta_cloned
-            ):
+            # Chủ batch
+            if user_role == eff_owner and eff_status not in ("READY_FOR_NEXT_LEVEL", "CLOSED"):
                 can_create = True
-            elif user_role == eff_owner and eff_status not in ("READY_FOR_NEXT_LEVEL", "CLOSED"):
+            # Tầng kế tiếp: CHỈ KHI ĐÃ CLONE
+            elif user_role != eff_owner and meta_cloned:
                 can_create = True
-        # ✅ Admin và Superadmin luôn được phép thêm EPCIS Event
+
+        # ---- Clone to Next Level ----
+        can_clone = False
         if is_superadmin or is_admin:
-            can_create = True
+            can_clone = True
+        elif user_role == eff_owner and eff_status not in ("READY_FOR_NEXT_LEVEL", "CLOSED"):
+            can_clone = True
 
         return {
             "items": items,
             "meta": {
                 "batch_owner_role": eff_owner,
                 "batch_status": eff_status,
-                "can_create": can_create,
                 "has_cloned": bool(meta_cloned),
+                "can_create": can_create,
+                "can_clone": can_clone,
                 "requester_role": user_role,
                 "batch_quantity": meta_quantity,
                 "used_quantity": meta_used,
@@ -493,6 +495,7 @@ async def list_events(
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(500, f"EPCIS list failed: {e}")
+
 
 # ------------------------------ Update ----------------------------------
 @router.put("/events/{event_id}")
