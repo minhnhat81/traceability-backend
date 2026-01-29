@@ -145,6 +145,7 @@ def healthz():
 # ----------------------------------------------------------
 # 🧾 Middleware: Audit logging (đã FIX việc đọc body)
 # ----------------------------------------------------------
+"""
 @app.middleware("http")
 async def audit_mw(request: Request, call_next):
     origin = request.headers.get("origin")
@@ -199,7 +200,7 @@ async def audit_mw(request: Request, call_next):
 
     return response
 
-
+"""
 
 # ----------------------------------------------------------
 # 🧩 Auto-sync EPCIS Context from GS1 (Hybrid Online + Local)
