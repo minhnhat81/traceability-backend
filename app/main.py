@@ -27,7 +27,7 @@ ALLOWED_ORIGINS = [
     "http://localhost:3002",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:3002",
-    "https://traceability-frontend-ayuz9avhr-nhats-projects-b54740d6.vercel.app",
+    "https://traceability-frontend.vercel.app",
 ]
 # Cho phép bất kỳ port localhost (dành cho môi trường dev)
 ALLOW_ORIGIN_REGEX = r"https://.*\.vercel\.app$"
